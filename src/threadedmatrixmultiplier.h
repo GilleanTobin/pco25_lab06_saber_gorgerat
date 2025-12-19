@@ -6,10 +6,11 @@
 #include <pcosynchro/pcomutex.h>
 #include <pcosynchro/pcosemaphore.h>
 #include <pcosynchro/pcothread.h>
+#include <queue> // pour stocker les jobs dans le buffer et pour avoir une structure FIFO pour modèle producteur-consommateur
+#include <vector> //pour stocker les threads
 
 #include "abstractmatrixmultiplier.h"
 #include "matrix.h"
-
 
 ///
 /// A class that holds the necessary parameters for a thread to do a job.
@@ -18,11 +19,20 @@ template<class T>
 class ComputeParameters
 {
 public:
-    const SquareMatrix<T>* A;
-    const SquareMatrix<T>* B;
-    SquareMatrix<T>* C;
 
-    /* Maybe some parameters */
+
+    // Matrices qu'on va utiliser
+    const SquareMatrix<T>* A = nullptr;
+    const SquareMatrix<T>* B = nullptr;
+    SquareMatrix<T>* C = nullptr;
+
+    // Infos sur le bloc à calculer
+    int blockRow = 0;     // indice du bloc en ligne
+    int blockCol = 0;     // indice du bloc en colonne
+    int blockSize = 0;    // taille d’un bloc
+
+    // Taille totale matrice
+    int matrixSize = 0;
 };
 
 
@@ -32,26 +42,88 @@ public:
 /// Here we only wrote two potential methods, but there could be more at the end...
 ///
 template<class T>
-class Buffer
+class Buffer: public PcoHoareMonitor
 {
 public:
-    int nbJobFinished{0}; // Keep this updated
-    /* Maybe some parameters */
+    int nbJobFinished{0};
 
-    ///
     /// \brief Sends a job to the buffer
     /// \param Reference to a ComputeParameters object which holds the necessary parameters to execute a job
     ///
-    void sendJob(ComputeParameters<T> params) {}
+    void sendJob(ComputeParameters<T> params) {
+        monitorIn();             // Début section critique
+        jobs.push(params);       // Ajouter un job
+        signal(hasJob);          // Réveiller un worker
+        monitorOut();            // Fin de la section critique
+    }
 
     ///
     /// \brief Requests a job to the buffer
     /// \param Reference to a ComputeParameters object which holds the necessary parameters to execute a job
     /// \return true if a job is available, false otherwise
     ///
-    bool getJob(ComputeParameters<T>& parameters) { return false; }
+    bool getJob(ComputeParameters<T>& parameters)
+    {
+        monitorIn();
 
-    /* Maybe more methods */
+        if (jobs.empty() && !stop) {
+            wait(hasJob);
+        }
+
+        // Si on arrête et qu'il n'y a rien, le worker peut sortir
+        if (stop && jobs.empty()) {
+            monitorOut();
+            return false;
+        }
+
+        parameters = jobs.front();
+        jobs.pop();
+
+        monitorOut();
+        return true;
+    }
+
+    // Le worker appelle ça quand il a fini un job
+    void jobDone()
+    {
+        monitorIn();
+        nbJobFinished = nbJobFinished + 1;
+        if(jobs.empty()){
+            signal(noJob);
+        }
+        monitorOut();
+    }
+
+    // Appelé au destructeur pour débloquer les workers
+    void shutdown(int nbWorkers)
+    {
+        monitorIn();
+        stop = true;
+        for (int i = 0; i < nbWorkers; ++i) {
+            // On réveille ceux qui attendent
+            signal(hasJob);
+        }
+        monitorOut();
+    }
+
+
+    void waitOnJobs(int nbJob){
+        monitorIn();
+
+        while(nbJobFinished < nbJob){
+            wait(noJob);
+        }
+
+        monitorOut();
+    }
+
+private:
+    std::queue<ComputeParameters<T>> jobs;
+    PcoHoareMonitor::Condition hasJob;
+    bool stop = false;
+
+    PcoHoareMonitor::Condition noJob;
+
 };
 
 
@@ -74,7 +146,11 @@ public:
     ThreadedMatrixMultiplier(int nbThreads, int nbBlocksPerRow = 0)
         : nbThreads(nbThreads), nbBlocksPerRow(nbBlocksPerRow)
     {
-        // TODO
+        // Création des threads workers
+        // Chaque thread va exécuter workerLoop
+        for (int i = 0; i < nbThreads; i++) {
+            workers.push_back(new PcoThread(workerLoop, this));
+        }
     }
 
     ///
@@ -84,9 +160,14 @@ public:
     ///
     ~ThreadedMatrixMultiplier()
     {
-        // TODO
-    }
+        // On arrête proprement les threads, on apprends des erreurs des labos précédents
+        buffer.shutdown(nbThreads);
 
+        for (int i = 0; i < (int)workers.size(); i++) {
+            workers[i]->join();
+            delete workers[i];
+        }
+    }
     ///
     /// \brief multiply
     /// \param A First matrix
@@ -111,22 +192,73 @@ public:
     ///
     void multiply(const SquareMatrix<T>& A, const SquareMatrix<T>& B, SquareMatrix<T>& C, int nbBlocksPerRow)
     {
-        // OK, computation is done correctly, but... Is it really multithreaded?!?
-        // TODO : Get rid of the next lines and do something meaningful
-        for (int i = 0; i < A.size(); i++) {
-            for (int j = 0; j < A.size(); j++) {
-                T result = 0.0;
-                for (int k = 0; k < A.size(); k++) {
-                    result += A.element(k, j) * B.element(i, k);
-                }
-                C.setElement(i, j, result);
+        int n = A.size();
+        int blockSize = n / nbBlocksPerRow;
+        int totalJobs = nbBlocksPerRow * nbBlocksPerRow;
+
+        // Réinitialisation du compteur
+        buffer.nbJobFinished = 0;
+
+        // Création des jobs je me dis que un job = un bloc
+        for (int br = 0; br < nbBlocksPerRow; br++) {
+            for (int bc = 0; bc < nbBlocksPerRow; bc++) {
+                ComputeParameters<T> p;
+                p.A = &A;
+                p.B = &B;
+                p.C = &C;
+                p.blockRow = br;
+                p.blockCol = bc;
+                p.blockSize = blockSize;
+                p.matrixSize = n;
+
+                buffer.sendJob(p);
             }
         }
+
+        // Attente que tous les jobs soient finis
+        buffer.waitOnJobs(totalJobs);
     }
 
 protected:
     int nbThreads;
     int nbBlocksPerRow;
+
+
+private:
+
+    Buffer<T> buffer;
+    std::vector<PcoThread*> workers;
+
+
+    static void workerLoop(void* arg)
+    {
+        ThreadedMatrixMultiplier<T>* self =
+            static_cast<ThreadedMatrixMultiplier<T>*>(arg);
+
+        ComputeParameters<T> p;
+
+        // Le thread prend des jobs tant qu'il y en a
+        while (self->buffer.getJob(p)) {
+            self->computeBlock(p);
+            self->buffer.jobDone();
+        }
+    }
+
+    void computeBlock(const ComputeParameters<T>& p)
+    {
+        int rowStart = p.blockRow * p.blockSize;
+        int colStart = p.blockCol * p.blockSize;
+
+        for (int i = rowStart; i < rowStart + p.blockSize; i++) {
+            for (int j = colStart; j < colStart + p.blockSize; j++) {
+                T result = 0;
+                for (int k = 0; k < p.matrixSize; k++) {
+                    result += p.A->element(k, j) * p.B->element(i, k);
+                }
+                p.C->setElement(i, j, result);
+            }
+        }
+    }
 };
 
 
