@@ -70,7 +70,7 @@ public:
             wait(hasJob);
         }
 
-        // Si on arrête et qu'il n'y a rien, le worker peut sortir
+        // Si on arrête et qu'il n'y a rien, le worker peut sortir du moniteur
         if (stop && jobs.empty()) {
             monitorOut();
             return false;
@@ -83,7 +83,7 @@ public:
         return true;
     }
 
-    // Le worker appelle ça quand il a fini un job
+    // Le worker appelle quand il a fini un job
     void jobDone()
     {
         monitorIn();
@@ -102,11 +102,12 @@ public:
         for (int i = 0; i < nbWorkers; ++i) {
             // On réveille ceux qui attendent
             signal(hasJob);
+
         }
         monitorOut();
     }
 
-
+    // Permet au thread principal d'attendre sur les worker
     void waitOnJobs(int nbJob){
         monitorIn();
 
@@ -160,7 +161,7 @@ public:
     ///
     ~ThreadedMatrixMultiplier()
     {
-        // On arrête proprement les threads, on apprends des erreurs des labos précédents
+        // On arrête proprement les threads
         buffer.shutdown(nbThreads);
 
         for (int i = 0; i < (int)workers.size(); i++) {

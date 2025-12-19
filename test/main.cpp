@@ -8,7 +8,7 @@
 #define ThreadedMultiplierType ThreadedMatrixMultiplier<int>
 
 // Decommenting the next line allows to check for interlocking
-// #define CHECK_DURATION
+//#define CHECK_DURATION
 
 TEST(Multiplier, SingleThread){
 
