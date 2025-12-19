@@ -4,7 +4,8 @@ project(PCO_LAB06 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_library(GTEST_LIB gtest REQUIRED)
+find_package(GTest REQUIRED)
+find_package(Threads REQUIRED)
 find_library(PCOSYNCHRO_LIB pcosynchro REQUIRED)
 
 set(SOURCES
@@ -28,8 +29,10 @@ add_executable(pco_matrices
 )
 
 target_link_libraries(pco_matrices
-    ${GTEST_LIB}
+    GTest::gtest_main
+    GTest::gtest
+    Threads::Threads
     ${PCOSYNCHRO_LIB}
 )
 
-
+target_link_options(pco_matrices PRIVATE -no-pie)
